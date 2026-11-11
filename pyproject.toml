@@ -11,7 +11,9 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = ["crazyflow[gpu]==0.3.2"]  # Linux x86-64 + CUDA 12 only (Empire AI, Colab). Macs use the CPU build.
-dev = ["pytest>=8"]
+viz = ["matplotlib>=3.8", "pillow>=10"]  # top-down episode videos
+train = ["flax>=0.10", "optax>=0.2"]
+dev = ["pytest>=8", "matplotlib>=3.8", "pillow>=10", "flax>=0.10", "optax>=0.2"]
 
 [build-system]
 requires = ["hatchling"]

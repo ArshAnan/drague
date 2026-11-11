@@ -131,15 +131,18 @@ def resolve_outcome(alive, tracked_steps, t, cfg: GameConfig, xp):
 
 # ----------------------------------------------------------------------------- reward
 
-def team_rewards(pos, alive, tracked_now, crashed_now, done, pursuers_win, cfg: GameConfig, xp):
-    """Zero-sum rewards. Returns (pursuer_team_reward, evader_reward), each (W,).
+# Order of the arrays returned by reward_terms. Each is already signed the way it enters
+# the pursuer team's reward (shaping and crash are <= 0).
+REWARD_TERMS = ("tracking", "shaping", "crash", "terminal")
 
-    Pursuer team reward per step:
-        + 1/T                          if the evader is tracked this step (sums to tracked fraction)
-        - shaping_coef * d_min / (2R) / T   dense pull toward the evader (d_min over live pursuers)
-        - crash_penalty * (#pursuers that crashed this step)
-        +1 / -1                        on the final step, for a win / loss
-    The evader gets exactly the negative, so the game is zero-sum.
+
+def reward_terms(pos, alive, tracked_now, crashed_now, done, pursuers_win, cfg: GameConfig, xp):
+    """The four pieces of the pursuer team's per-step reward. Each array is (W,).
+
+    tracking   +1/T if the evader is tracked this step (sums to the tracked fraction)
+    shaping    -shaping_coef * d_min / (2R) / T, d_min over live pursuers
+    crash      -crash_penalty per pursuer that crashed this step
+    terminal   +1 win / -1 loss on the final step, otherwise 0
     """
     T = cfg.max_steps
     P = cfg.n_pursuers
@@ -147,10 +150,21 @@ def team_rewards(pos, alive, tracked_now, crashed_now, done, pursuers_win, cfg: 
     d = xp.where(alive[:, :P], pursuer_evader_dist(pos, cfg, xp), diameter)
     d_min = xp.min(d, axis=1)
 
-    r = tracked_now * (1.0 / T)
-    r = r - cfg.shaping_coef * (d_min / diameter) / T
-    r = r - cfg.crash_penalty * xp.sum(crashed_now[:, :P] * 1.0, axis=1)
-    r = r + xp.where(done, xp.where(pursuers_win, 1.0, -1.0), 0.0)
+    tracking = tracked_now * (1.0 / T)
+    shaping = -cfg.shaping_coef * (d_min / diameter) / T
+    crash = -cfg.crash_penalty * xp.sum(crashed_now[:, :P] * 1.0, axis=1)
+    terminal = xp.where(done, xp.where(pursuers_win, 1.0, -1.0), 0.0)
+    return tracking, shaping, crash, terminal
+
+
+def team_rewards(pos, alive, tracked_now, crashed_now, done, pursuers_win, cfg: GameConfig, xp):
+    """Zero-sum rewards. Returns (pursuer_team_reward, evader_reward), each (W,).
+
+    The pursuer reward is the sum of `reward_terms`. The evader gets exactly the negative.
+    """
+    tracking, shaping, crash, terminal = reward_terms(
+        pos, alive, tracked_now, crashed_now, done, pursuers_win, cfg, xp)
+    r = tracking + shaping + crash + terminal
     return r, -r
 
 
@@ -200,9 +214,9 @@ def observations(pos, vel, alive, cfg: GameConfig, xp):
          (xp.zeros_like(dist) + alive[:, None, :, None])],
         axis=-1,
     )                                                                 # (W, D, D, OTHER_DIM)
-    idx = _others_index(D)
-    rows = np.arange(D)[:, None]
-    others = full[:, rows, idx]                                       # (W, D, D-1, OTHER_DIM)
+    # Constant index arrays (D is static), so this gather is valid inside jax.jit.
+    idx = xp.asarray(_others_index(D))
+    others = full[xp.arange(W)[:, None, None], xp.arange(D)[None, :, None], idx[None, :, :]]
     return self_feat, others
 
 

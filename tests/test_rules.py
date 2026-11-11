@@ -130,6 +130,23 @@ def test_rewards_zero_sum_and_terminal(xp):
         assert abs(rp - (step_part + sign)) < 1e-5
 
 
+def test_reward_terms_sum_to_team_reward(xp):
+    pos = _pos(xp, [[0.5, 0, 1], [3, 0, 1], [-3, 0, 1], [0, 0, 1]])
+    alive = _alive(xp)
+    crashed = xp.asarray([[True, False, False, False]])
+    tracked = rules.is_tracked(pos, alive, CFG, xp)
+    done = xp.asarray([True])
+    win = xp.asarray([True])
+    terms = rules.reward_terms(pos, alive, tracked, crashed, done, win, CFG, xp)
+    assert len(terms) == len(rules.REWARD_TERMS)
+    total = sum(float(np.asarray(t)[0]) for t in terms)
+    rp, _ = rules.team_rewards(pos, alive, tracked, crashed, done, win, CFG, xp)
+    assert abs(total - float(np.asarray(rp)[0])) < 1e-5
+    names = dict(zip(rules.REWARD_TERMS, terms))
+    assert abs(float(np.asarray(names["crash"])[0]) + CFG.crash_penalty) < 1e-5
+    assert abs(float(np.asarray(names["terminal"])[0]) - 1.0) < 1e-5
+
+
 def test_crash_penalty(xp):
     pos = _pos(xp, [[3, 0, 1], [-3, 0, 1], [0, 3, 1], [0, 0, 1]])
     alive = _alive(xp)
