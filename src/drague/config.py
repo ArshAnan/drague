@@ -8,6 +8,7 @@ the last drone (index n_pursuers) is the evader.
 """
 
 from dataclasses import dataclass
+from math import pi, sin, sqrt
 
 
 @dataclass(frozen=True)
@@ -58,9 +59,19 @@ class GameConfig:
         return int(round(self.episode_seconds / self.control_dt))
 
     def __post_init__(self):
+        # Jitter is applied per axis, so in the xy-plane a pursuer can move up to jitter*sqrt(2)
+        # off its ring slot, and the evader can sit up to halfwidth*sqrt(2) from the center.
+        xy_jitter = self.spawn_jitter * sqrt(2)
         if self.n_pursuers < 1:
             raise ValueError("need at least one pursuer")
-        if self.spawn_ring_radius + self.spawn_jitter >= self.arena_radius:
-            raise ValueError("spawn ring must fit inside the arena")
-        if not (self.z_min < self.spawn_height < self.z_max):
-            raise ValueError("spawn height must be inside the arena's vertical bounds")
+        if self.spawn_ring_radius + xy_jitter >= self.arena_radius:
+            raise ValueError("spawn ring (plus jitter) must fit inside the arena")
+        if not (self.z_min < self.spawn_height - self.spawn_jitter
+                and self.spawn_height + self.spawn_jitter < self.z_max):
+            raise ValueError("spawn height (plus jitter) must be inside the arena's vertical bounds")
+        if self.spawn_ring_radius - xy_jitter - self.evader_spawn_halfwidth * sqrt(2) <= self.tracking_radius:
+            raise ValueError("pursuers could spawn already tracking the evader")
+        if self.n_pursuers > 1:
+            slot_gap = 2 * self.spawn_ring_radius * sin(pi / self.n_pursuers)
+            if slot_gap - 2 * self.spawn_jitter * sqrt(3) <= self.collision_radius:
+                raise ValueError("pursuers could spawn colliding with each other")

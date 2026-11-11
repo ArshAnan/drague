@@ -51,4 +51,4 @@ The spike writes `results/spike_<host>_<time>.json`. Copy the key numbers into `
 - Drone index `0..P-1` = pursuers, index `P` = evader.
 - Everything is batched over a leading world axis `W`.
 - Game numbers only live in `GameConfig`. Experiments differ by config, not by code edits.
-- Count compute as **env steps = worlds × policy steps**, including exploiter training.
+- Count compute as **env steps = worlds × policy steps** (one policy step = 50 ms = 25 Crazyflow physics ticks), including exploiter training.

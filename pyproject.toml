@@ -6,11 +6,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
-    "crazyflow",          # brings in jax; pin the exact version after the week-1 spike passes
+    "crazyflow==0.3.2",   # brings in jax; pinned to the version the week-1 spike ran on
 ]
 
 [project.optional-dependencies]
-gpu = ["crazyflow[gpu]"]  # Linux x86-64 + CUDA 12 only (Empire AI, Colab). Macs use the CPU build.
+gpu = ["crazyflow[gpu]==0.3.2"]  # Linux x86-64 + CUDA 12 only (Empire AI, Colab). Macs use the CPU build.
 dev = ["pytest>=8"]
 
 [build-system]
@@ -22,3 +22,4 @@ packages = ["src/drague"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]   # import drague even if the editable install's .pth is skipped

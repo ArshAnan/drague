@@ -12,11 +12,19 @@ Commit that file (or paste it to your teammate) so budgets are planned from real
 Checks:
   1. versions        crazyflow / jax import, which devices JAX sees
   2. spawn           write our pursuer-ring spawn into the sim and read it back
-  3. hover           drones hold their spawned positions under hover thrust
+  3. hover           drones hold their spawned positions under state control (position setpoints)
   4. masked_reset    sim.reset(mask) resets only the selected worlds
   5. per_drone_mass  physical parameters can differ per drone (needed if sides differ physically)
   6. contacts        sim.contacts() runs on a multi-drone scene
-  7. throughput      control steps per second for several (worlds, team size) settings
+  7. throughput      policy steps per second for several (worlds, team size) settings
+
+Timing: Crazyflow's physics runs at `sim.freq` (500 Hz). One env step is one policy step
+(cfg.control_dt = 50 ms), i.e. `sim.freq * cfg.control_dt` = 25 physics ticks. Don't derive the
+tick count from `sim.control_freq`: that's the controller's internal rate (500 Hz for attitude
+control, 100 Hz for state control), not our policy rate.
+
+Why state control: open-loop attitude control with thrust = m*g sinks (~0.3 m/s^2 in so_rpy),
+because the hover thrust of the fitted model isn't exactly m*g. State control closes the loop.
 """
 
 import argparse
@@ -59,17 +67,27 @@ def check(name):
 def make_sim(n_worlds, n_drones, device):
     from crazyflow.control import Control
     from crazyflow.sim import Dynamics, Sim
-    sim = Sim(n_worlds=n_worlds, n_drones=n_drones, control=Control.attitude,
+    sim = Sim(n_worlds=n_worlds, n_drones=n_drones, control=Control.state,
               dynamics=Dynamics.so_rpy, device=device)
     sim.reset()
     return sim
 
 
-def hover_cmd(sim):
-    import jax.numpy as jnp
-    mass = float(jnp.ravel(sim.data.params.mass)[0])
-    cmd = np.zeros((sim.n_worlds, sim.n_drones, 4), dtype=np.float32)
-    cmd[..., 3] = mass * 9.81
+def ticks_per_policy_step(sim, cfg):
+    """Physics ticks in one policy step (cfg.control_dt). 25 at 500 Hz physics / 20 Hz policy."""
+    ticks = sim.freq * cfg.control_dt
+    assert abs(ticks - round(ticks)) < 1e-9, f"control_dt {cfg.control_dt} not a multiple of 1/{sim.freq}"
+    return int(round(ticks))
+
+
+def hold_cmd(pos):
+    """State-control command holding each drone at `pos`.
+
+    Layout: [x, y, z, vx, vy, vz, ax, ay, az, yaw, roll_rate, pitch_rate, yaw_rate].
+    """
+    pos = np.asarray(pos, dtype=np.float32)
+    cmd = np.zeros(pos.shape[:2] + (13,), dtype=np.float32)
+    cmd[..., :3] = pos
     return cmd
 
 
@@ -112,13 +130,15 @@ def check_hover(device, cfg, seconds=2.0):
     import jax.numpy as jnp
     sim = make_sim(256, cfg.n_drones, device)
     pos0 = spawn_into(sim, cfg)
-    sim.attitude_control(hover_cmd(sim))
-    n_ctrl = int(seconds * sim.control_freq)
-    for _ in range(n_ctrl):
-        sim.step(sim.freq // sim.control_freq)
+    cmd = hold_cmd(pos0)
+    ticks = ticks_per_policy_step(sim, cfg)
+    for _ in range(int(round(seconds / cfg.control_dt))):
+        sim.state_control(cmd)
+        sim.step(ticks)
     drift = float(jnp.max(jnp.linalg.norm(sim.data.states.pos - pos0, axis=-1)))
     assert drift < 0.25, f"drones drifted {drift:.3f} m in {seconds}s of hover"
-    return {"max_drift_m": round(drift, 4), "freq": sim.freq, "control_freq": sim.control_freq}
+    return {"max_drift_m": round(drift, 4), "freq": sim.freq, "control_freq": sim.control_freq,
+            "ticks_per_policy_step": ticks}
 
 
 @check("masked_reset")
@@ -143,8 +163,8 @@ def check_per_drone_mass(device, cfg):
     shape_before = list(m.shape)
     scale = jnp.ones((1, cfg.n_drones, 1)).at[0, -1, 0].set(0.8)   # lighter evader
     sim.data = sim.data.replace(params=sim.data.params.replace(mass=m * scale))
-    sim.attitude_control(hover_cmd(sim))
-    sim.step(sim.freq // sim.control_freq)
+    sim.state_control(hold_cmd(sim.data.states.pos))
+    sim.step(ticks_per_policy_step(sim, cfg))
     assert bool(jnp.all(jnp.isfinite(sim.data.states.pos)))
     return {"mass_shape_default": shape_before, "mass_shape_after": list(sim.data.params.mass.shape)}
 
@@ -158,25 +178,28 @@ def check_contacts(device, cfg):
 
 
 @check("throughput")
-def check_throughput(device, worlds_list, pursuers_list, n_ctrl=200):
+def check_throughput(device, worlds_list, pursuers_list, n_ctrl=50):
     rows = []
     for P in pursuers_list:
         cfg = GameConfig(n_pursuers=P)
         for W in worlds_list:
             sim = make_sim(W, cfg.n_drones, device)
-            spawn_into(sim, cfg)
-            sim.attitude_control(hover_cmd(sim))
-            ticks = sim.freq // sim.control_freq
+            cmd = hold_cmd(spawn_into(sim, cfg))
+            ticks = ticks_per_policy_step(sim, cfg)
             for _ in range(5):                       # warm-up / compile
+                sim.state_control(cmd)
                 sim.step(ticks)
             sim.data.states.pos.block_until_ready()
             t0 = time.perf_counter()
-            for _ in range(n_ctrl):
+            for _ in range(n_ctrl):                  # a new command every policy step, like a real rollout
+                sim.state_control(cmd)
                 sim.step(ticks)
             sim.data.states.pos.block_until_ready()
             dt = time.perf_counter() - t0
-            row = {"pursuers": P, "worlds": W, "drones": cfg.n_drones,
-                   "env_steps_per_s": round(W * n_ctrl / dt),          # one env step = one 20 Hz policy step in one world
+            # One env step = one policy step (cfg.control_dt of sim time) in one world.
+            # Physics only: no policy, rules or observations, so real training will be slower.
+            row = {"pursuers": P, "worlds": W, "drones": cfg.n_drones, "ticks_per_env_step": ticks,
+                   "env_steps_per_s": round(W * n_ctrl / dt),
                    "drone_physics_ticks_per_s": round(W * cfg.n_drones * n_ctrl * ticks / dt)}
             rows.append(row)
             print(f"      P={P:<2d} W={W:<6d} {row['env_steps_per_s']:>12,d} env steps/s")
