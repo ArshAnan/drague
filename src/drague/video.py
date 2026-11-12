@@ -1,4 +1,4 @@
-"""Replay of a saved episode: a top view beside a side view.
+"""Replay of a saved episode: a top view with a side view directly under it.
 
 Writes an mp4 when ffmpeg is on PATH, otherwise a gif. Matplotlib is optional
 (`uv sync --extra viz`); importing this module does not import it.
@@ -80,15 +80,26 @@ def render_episode(
     n_pursuers = cfg.n_pursuers
     n_drones = pos.shape[1]
 
-    fig, (ax, side) = plt.subplots(1, 2, figsize=(11.4, 5.6), dpi=120)
-    fig.subplots_adjust(bottom=0.14, top=0.86, wspace=0.28)
+    # The side view sits under the top view and shares its x scale, so a drone's
+    # left-right position is the same pixel in both panels. The side view looks
+    # in the +y direction: up on the top view is away from that camera.
+    fig_w, fig_h = 6.7, 9.9
+    square, side_h = 5.15, 2.4
+    left, side_bottom, gap = 0.95, 0.78, 0.95
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=120)
+
+    def _box(x_in, y_in, w_in, h_in):
+        return [x_in / fig_w, y_in / fig_h, w_in / fig_w, h_in / fig_h]
+
     limit = cfg.arena_radius * 1.2
+    ax = fig.add_axes(_box(left, side_bottom + side_h + gap, square, square))
+    side = fig.add_axes(_box(left, side_bottom, square, side_h), sharex=ax)
     ax.set_xlim(-limit, limit)
     ax.set_ylim(-limit, limit)
-    ax.set_aspect("equal")
+    ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
-    ax.set_title("top")
+    ax.set_title("top view, looking down")
     ax.add_patch(Circle((0, 0), cfg.arena_radius, fill=False, ec="0.25", lw=1.5))
     ax.add_patch(Circle((0, 0), cfg.spawn_ring_radius, fill=False, ec="0.75", lw=0.8, ls="--"))
     ring = Circle((0, 0), cfg.tracking_radius, fill=False, ec=TRACK_COLOR, lw=1.5, ls="--")
@@ -96,16 +107,19 @@ def render_episode(
     ax.add_patch(ring)
 
     z_pad = 0.25
-    side.set_xlim(-limit, limit)
     side.set_ylim(cfg.z_min - z_pad, cfg.z_max + z_pad)
     side.set_xlabel("x (m)")
     side.set_ylabel("z (m)")
-    side.set_title("side")
+    side.set_title("side view, looking along +y")
     side.add_patch(Rectangle(
         (-cfg.arena_radius, cfg.z_min), 2 * cfg.arena_radius, cfg.z_max - cfg.z_min,
         fill=False, ec="0.25", lw=1.5,
     ))
     side.axhline(cfg.spawn_height, color="0.75", lw=0.8, ls="--")
+    fig.canvas.draw()
+    top_box = ax.get_position()
+    side_box = side.get_position()
+    side.set_position([top_box.x0, side_box.y0, top_box.width, side_box.height])
 
     dots = []
     crosses = []
@@ -125,7 +139,7 @@ def render_episode(
     ax.plot([], [], "o", color=EVADER_COLOR, ms=7, label="evader")
     ax.legend(loc="upper right", frameon=False)
     fig.text(
-        0.5, 0.02,
+        0.5, 0.012,
         f"{run_id}    {pursuer_policy} vs {evader_policy}",
         ha="center", va="bottom", fontsize=8,
     )
@@ -143,7 +157,8 @@ def render_episode(
         flag = "yes" if tracked[frame] else "no"
         fig.suptitle(
             f"t={frame * cfg.control_dt:.2f}s   tracked={flag}   "
-            f"tracked_fraction={fraction:.2f}   {shown}".rstrip()
+            f"tracked_fraction={fraction:.2f}   {shown}".rstrip(),
+            y=0.985, fontsize=11,
         )
         ev = pos[frame, n_pursuers, :2]
         ring.center = (float(ev[0]), float(ev[1]))
