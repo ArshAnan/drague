@@ -38,7 +38,7 @@ results/
     summary.json
 ```
 
-`<step>` is the checkpoint env-step, nine digits. Scripted runs use `000000000`. `<run_id>` looks like `scripted_standoff_vs_flee_p3_s0_20261111T193000Z`.
+`<step>` is the checkpoint env-step, nine digits. Scripted runs use `000000000`. `<run_id>` starts with the UTC date and time, then the method, for example `2026-11-11_19-30-00_selfplay_p3_s0`. A scripted run also names the two policies: `2026-11-11_19-30-00_scripted_standoff_vs_flee_p3_s0`.
 
 `method` is `scripted`, `selfplay`, `pfsp`, or `league`. Keys are snake_case. Fractions are in `[0, 1]`.
 

@@ -59,7 +59,8 @@ def test_rollout_writes_the_schema(tmp_path):
     assert manifest["game"]["episode_seconds"] == 0.25
     assert manifest["budget"]["env_steps_exploiter"] == 0
     assert manifest["backend"] == "point_mass"
-    assert "standoff_vs_idle_p3_s0_" in manifest["run_id"]
+    assert manifest["run_id"].endswith("_scripted_standoff_vs_idle_p3_s0")
+    assert manifest["run_id"][4] == "-" and manifest["run_id"][10] == "_"
 
     episodes = [json.loads(line) for line in (run / "episodes.jsonl").read_text().splitlines()]
     assert len(episodes) == 2

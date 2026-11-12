@@ -90,13 +90,14 @@ def to_jsonable(value):
 
 def _utc_stamp(when: datetime | None = None) -> str:
     when = when or datetime.now(timezone.utc)
-    return when.strftime("%Y%m%dT%H%M%SZ")
+    return when.strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def make_run_id(method: str, pursuer: str, evader: str, n_pursuers: int, seed: int,
                 when: datetime | None = None) -> str:
-    """`scripted_standoff_vs_flee_p3_s0_20261111T193000Z`."""
-    return f"{method}_{pursuer}_vs_{evader}_p{n_pursuers}_s{seed}_{_utc_stamp(when)}"
+    """`2026-11-11_19-30-00_selfplay_p3_s0`, or with the matchup when the two sides differ."""
+    matchup = f"_{pursuer}_vs_{evader}" if pursuer != evader else ""
+    return f"{_utc_stamp(when)}_{method}{matchup}_p{n_pursuers}_s{seed}"
 
 
 def _git_info(cwd: Path | None = None) -> dict:
