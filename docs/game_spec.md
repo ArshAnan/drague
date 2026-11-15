@@ -35,7 +35,7 @@ Per step, the pursuer team gets:
 | Term | Value |
 |---|---|
 | Tracking | `+1/T` if tracked this step (sums to the tracked fraction over an episode) |
-| Shaping | `-0.1 · d_min / (2R) / T`, where `d_min` is the closest live pursuer's distance to the evader |
+| Shaping | `-1.0 · d_min / (2R) / T`, where `d_min` is the closest live pursuer's distance to the evader |
 | Crash | `-0.2` per pursuer that crashed this step |
 | Terminal | `+1` win / `-1` loss on the final step |
 
@@ -96,4 +96,4 @@ The env knows nothing about which policy controls which side. The league code pi
 2. **Observability.** Full observability (v0) vs a sensing radius for teammates/evader. Partial observability makes teamwork matter more but makes learning harder.
 3. **Balance per team size.** Scripted pursuers (`scripted.standoff_pursuers`) vs a fleeing evader win 2% / 5% / 28% / 51% for P = 2 / 3 / 4 / 8. We should tune evader speed per team size so self-play sits near 50/50 at the middle budget.
 4. **Crazyflow action mapping.** State control (position/velocity setpoints, easiest to learn) vs attitude control (more agile, harder). Decide after the spike.
-5. **Shaping coefficient.** 0.1 is a guess. Check that turning it off doesn't change who wins in self-play, only how fast learning goes.
+5. **Shaping coefficient.** Raised from 0.1 to 1.0 on 2026-11-12: with 0.1, three pursuers never learned to track even a motionless evader. Still to check: that turning it off doesn't change who wins in self-play, only how fast learning goes.

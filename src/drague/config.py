@@ -43,7 +43,8 @@ class GameConfig:
 
     # Outcome and reward
     win_tracked_fraction: float = 0.5  # pursuers win at timeout if tracked >= this fraction of steps
-    shaping_coef: float = 0.1          # weight of the dense distance term (0 disables it)
+    shaping_coef: float = 1.0          # weight of the dense distance term (0 disables it); 0.1 was too
+                                       # weak for 3 pursuers to learn tracking (EXPERIMENTS.md, 2026-11-12)
     crash_penalty: float = 0.2         # team penalty when a pursuer crashes
 
     @property

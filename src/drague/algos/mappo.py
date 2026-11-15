@@ -11,13 +11,20 @@ from drague.algos.policy import ActorCritic, deterministic_action, log_prob, sam
 GAMMA = 0.99
 LAMBDA = 0.95
 CLIP = 0.2
-ENTROPY = 0.01
-EPOCHS = 2
+# The bonus is the pre-tanh Gaussian entropy, which grows without bound in log_std while the
+# squashed actions saturate at +-1. With 0.01 it drove std up and pushed drones out of the arena
+# (EXPERIMENTS.md, 2026-11-12), so it is off; the clipped surrogate sets the std on its own.
+ENTROPY = 0.0
+EPOCHS = 4
+MINIBATCHES = 8
 LEARNING_RATE = 3e-4
+MAX_GRAD_NORM = 0.5
+ALIVE_FEATURE = 9  # index of `alive` in the 10-value `self` observation (docs/game_spec.md, section 3)
 
 
-def make_optimizer():
-    return optax.adam(LEARNING_RATE)
+def make_optimizer(learning_rate=LEARNING_RATE):
+    """`learning_rate` may be a float or an optax schedule (counted in gradient steps)."""
+    return optax.chain(optax.clip_by_global_norm(MAX_GRAD_NORM), optax.adam(learning_rate))
 
 
 def init_role(key, net: ActorCritic, self_feat, others):
@@ -92,74 +99,109 @@ def _ppo_loss(params, net, self_feat, others, actions, old_logp, adv, returns):
     new_logp = log_prob(mean, log_std, actions)
     ratio = jnp.exp(new_logp - old_logp)
     clipped = jnp.clip(ratio, 1.0 - CLIP, 1.0 + CLIP)
-    policy_loss = -jnp.mean(jnp.minimum(ratio * adv, clipped * adv))
+    # Crashed drones are frozen and their actions are ignored, so their samples carry no policy
+    # signal. Mask them out of the policy terms (MAPPO "active masks"); the value head still
+    # learns the team return from them.
+    active = self_feat[..., ALIVE_FEATURE]
+    n_active = jnp.maximum(jnp.sum(active), 1.0)
+    active_mean = lambda x: jnp.sum(x * active) / n_active
+    policy_loss = -active_mean(jnp.minimum(ratio * adv, clipped * adv))
     value_loss = jnp.mean((value - returns) ** 2)
     entropy = jnp.mean(jnp.sum(jnp.clip(log_std, -5.0, 2.0) + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e), axis=-1))
     loss = policy_loss + 0.5 * value_loss - ENTROPY * entropy
-    return loss, {"policy_loss": policy_loss, "value_loss": value_loss, "entropy": entropy}
+    log_ratio = new_logp - old_logp
+    return loss, {
+        "policy_loss": policy_loss,
+        "value_loss": value_loss,
+        "entropy": entropy,
+        "approx_kl": active_mean(ratio - 1.0 - log_ratio),
+        "clip_frac": active_mean((jnp.abs(ratio - 1.0) > CLIP).astype(jnp.float32)),
+        "active_frac": jnp.mean(active),
+        "mean_abs": active_mean(jnp.mean(jnp.abs(mean), axis=-1)),
+    }
 
 
-def ppo_epoch(params, opt_state, optimizer, self_feat, others, actions, old_logp, adv, returns, net):
-    """One gradient step. The optimizer is closed over so its Python callables stay static."""
-    compiled = _compiled_ppo.setdefault((id(optimizer), id(net)), _compile_ppo(optimizer, net))
-    return compiled(params, opt_state, self_feat, others, actions, old_logp, adv, returns)
+def ppo_update(params, opt_state, optimizer, key, self_feat, others, actions, old_logp, adv, returns,
+               net, epochs=EPOCHS, minibatches=MINIBATCHES):
+    """`epochs` passes over the batch, each shuffled into `minibatches` gradient steps.
+
+    Inputs have three leading axes (T, W, A) for time, world and agent; they are flattened
+    into one sample axis. Returns metrics averaged over every gradient step.
+    """
+    compiled = _compiled_ppo.setdefault(
+        (id(optimizer), id(net), int(epochs), int(minibatches)),
+        _compile_ppo(optimizer, net, int(epochs), int(minibatches)))
+    return compiled(params, opt_state, key, self_feat, others, actions, old_logp, adv, returns)
 
 
-def _compile_ppo(optimizer, net):
-    def epoch(params, opt_state, self_feat, others, actions, old_logp, adv, returns):
-        (loss, metrics), grads = jax.value_and_grad(_ppo_loss, has_aux=True)(
-            params, net, self_feat, others, actions, old_logp, adv, returns)
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        metrics = {key: value for key, value in metrics.items()}
-        metrics["loss"] = loss
-        return params, opt_state, metrics
+def _compile_ppo(optimizer, net, epochs, minibatches):
+    def update(params, opt_state, key, self_feat, others, actions, old_logp, adv, returns):
+        flat = lambda x: x.reshape((-1,) + x.shape[3:])
+        data = tuple(flat(x) for x in (self_feat, others, actions, old_logp, adv, returns))
+        n = data[0].shape[0]
+        n_mb = max(1, min(minibatches, n))
+        size = n // n_mb
 
-    return jax.jit(epoch)
+        def grad_step(carry, batch):
+            params, opt_state = carry
+            (loss, metrics), grads = jax.value_and_grad(_ppo_loss, has_aux=True)(params, net, *batch)
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            return (params, opt_state), {**metrics, "loss": loss}
+
+        def epoch(carry, k):
+            perm = jax.random.permutation(k, n)[: n_mb * size].reshape(n_mb, size)
+            batches = tuple(x[perm] for x in data)
+            return jax.lax.scan(grad_step, carry, batches)
+
+        (params, opt_state), metrics = jax.lax.scan(
+            epoch, (params, opt_state), jax.random.split(key, epochs))
+        return params, opt_state, jax.tree_util.tree_map(jnp.mean, metrics)
+
+    return jax.jit(update)
 
 
 _compiled_ppo: dict = {}
 
 
-def advantages(rewards, values, dones, bootstrap):
+def advantages(rewards, values, dones, bootstrap, gamma=GAMMA, lam=LAMBDA):
     """Normalize advantages. rewards/values/dones are (T, N)."""
-    adv = gae(rewards, values, dones.astype(jnp.float32), bootstrap)
+    adv = gae(rewards, values, dones.astype(jnp.float32), bootstrap, gamma, lam)
     returns = adv + values
     std = jnp.std(adv)
     adv = (adv - jnp.mean(adv)) / jnp.where(std > 1e-6, std, 1.0)
     return adv, returns
 
 
-def update_pursuer(params, opt_state, optimizer, frames, bootstrap, net, epochs=EPOCHS):
+def update_pursuer(params, opt_state, optimizer, frames, bootstrap, net, epochs=EPOCHS, key=None,
+                   gamma=GAMMA):
     P = frames["p_value"].shape[-1]
     rewards = jnp.broadcast_to(frames["rewards"][:, :, 0:1], frames["p_value"].shape)
     dones = jnp.broadcast_to(frames["dones"][:, :, None], frames["p_value"].shape)
     flat = lambda x: x.reshape(x.shape[0], -1)
-    adv, returns = advantages(flat(rewards), flat(frames["p_value"]), flat(dones), bootstrap.reshape(-1))
+    adv, returns = advantages(
+        flat(rewards), flat(frames["p_value"]), flat(dones), bootstrap.reshape(-1), gamma)
     adv = adv.reshape(frames["p_value"].shape)
     returns = returns.reshape(frames["p_value"].shape)
-    metrics = None
-    for _ in range(epochs):
-        params, opt_state, metrics = ppo_epoch(
-            params, opt_state, optimizer,
-            frames["self"][:, :, :P], frames["others"][:, :, :P],
-            frames["actions"][:, :, :P], frames["p_logp"], adv, returns, net)
-    return params, opt_state, metrics
+    key = jax.random.PRNGKey(0) if key is None else key
+    return ppo_update(
+        params, opt_state, optimizer, key,
+        frames["self"][:, :, :P], frames["others"][:, :, :P],
+        frames["actions"][:, :, :P], frames["p_logp"], adv, returns, net, epochs)
 
 
-def update_evader(params, opt_state, optimizer, frames, bootstrap, net, epochs=EPOCHS):
+def update_evader(params, opt_state, optimizer, frames, bootstrap, net, epochs=EPOCHS, key=None,
+                  gamma=GAMMA):
     P = frames["self"].shape[-2] - 1
     values = frames["e_value"][..., 0]
     adv, returns = advantages(
-        frames["rewards"][:, :, -1], values, frames["dones"], bootstrap[..., 0])
+        frames["rewards"][:, :, -1], values, frames["dones"], bootstrap[..., 0], gamma)
     adv, returns = adv[..., None], returns[..., None]
-    metrics = None
-    for _ in range(epochs):
-        params, opt_state, metrics = ppo_epoch(
-            params, opt_state, optimizer,
-            frames["self"][:, :, P:P + 1], frames["others"][:, :, P:P + 1],
-            frames["actions"][:, :, P:P + 1], frames["e_logp"], adv, returns, net)
-    return params, opt_state, metrics
+    key = jax.random.PRNGKey(0) if key is None else key
+    return ppo_update(
+        params, opt_state, optimizer, key,
+        frames["self"][:, :, P:P + 1], frames["others"][:, :, P:P + 1],
+        frames["actions"][:, :, P:P + 1], frames["e_logp"], adv, returns, net, epochs)
 
 
 def deterministic_role_actions(params, net, self_feat, others):
