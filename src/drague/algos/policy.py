@@ -1,4 +1,10 @@
-"""Shared actor-critic. Mean-pooling other drones makes the weights independent of team size."""
+"""Shared actor-critic, independent of team size.
+
+Other drones are split by the `same_team` flag and encoded by two separate per-row networks,
+then pooled within each group. One pool mixing teammates and opponents (the first version) made
+"a teammate is close" and "the evader is close" look alike, so learning to avoid teammates also
+taught pursuers to back off the evader (EXPERIMENTS.md, 2026-11-12).
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,21 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 _ORTHO = nn.initializers.orthogonal
+SAME_TEAM_FEATURE = 8  # index of `same_team` in each 10-value `others` row (docs/game_spec.md, section 3)
+
+
+def _dense(features, scale=jnp.sqrt(2.0), name=None):
+    return nn.Dense(features, kernel_init=_ORTHO(scale), name=name)
+
+
+def _masked_pools(x, mask):
+    """Mean and max over the row axis, using only rows where mask is 1. Empty groups give zeros."""
+    m = mask[..., None]
+    count = jnp.sum(m, axis=-2)
+    mean = jnp.sum(x * m, axis=-2) / jnp.maximum(count, 1.0)
+    big = jnp.max(jnp.where(m > 0, x, -jnp.inf), axis=-2)
+    big = jnp.where(count > 0, big, 0.0)
+    return jnp.concatenate([mean, big], axis=-1)
 
 
 class ActorCritic(nn.Module):
@@ -15,14 +36,20 @@ class ActorCritic(nn.Module):
     @nn.compact
     def __call__(self, self_feat, others):
         # self_feat (..., 10), others (..., M, 10). Leading batch axes are free.
-        s = nn.tanh(nn.Dense(self.hidden, kernel_init=_ORTHO(jnp.sqrt(2.0)))(self_feat))
-        o = nn.tanh(nn.Dense(self.hidden, kernel_init=_ORTHO(jnp.sqrt(2.0)))(others))
-        pooled = jnp.mean(o, axis=-2)
-        h = nn.tanh(nn.Dense(self.hidden, kernel_init=_ORTHO(jnp.sqrt(2.0)))(
-            jnp.concatenate([s, pooled], axis=-1)))
-        mean = nn.Dense(3, kernel_init=_ORTHO(0.01))(h)
+        h = self.hidden
+        s = nn.tanh(_dense(h, name="self_enc")(self_feat))
+        mate = others[..., SAME_TEAM_FEATURE]
+        groups = []
+        for name, mask in (("mate", mate), ("opp", 1.0 - mate)):
+            x = nn.tanh(_dense(h, name=f"{name}_enc0")(others))
+            x = nn.tanh(_dense(h, name=f"{name}_enc1")(x))
+            groups.append(_masked_pools(x, mask))
+        z = jnp.concatenate([s, *groups], axis=-1)
+        z = nn.tanh(_dense(h, name="trunk0")(z))
+        z = nn.tanh(_dense(h, name="trunk1")(z))
+        mean = _dense(3, 0.01, name="mean_head")(z)
         log_std = self.param("log_std", nn.initializers.constant(-0.5), (3,))
-        value = nn.Dense(1, kernel_init=_ORTHO(1.0))(h).squeeze(-1)
+        value = _dense(1, 1.0, name="value_head")(z).squeeze(-1)
         return mean, log_std, value
 
 

@@ -16,8 +16,11 @@ import numpy as np
 from flax import serialization
 
 from drague.algos.mappo import (
+    ENTROPY,
     EPOCHS,
     LEARNING_RATE,
+    MAX_GRAD_NORM,
+    MINIBATCHES,
     collect_rollout,
     deterministic_role_actions,
     init_role,
@@ -121,6 +124,9 @@ def train(
         "budget_env_steps": budget_steps,
         "learning_rate": LEARNING_RATE,
         "epochs": EPOCHS,
+        "minibatches": MINIBATCHES,
+        "entropy_coef": ENTROPY,
+        "max_grad_norm": MAX_GRAD_NORM,
         "hidden": hidden,
         "exploiter_fraction": exploiter_fraction if method == "league" else 0.0,
         "pool_cap": pool_cap,
@@ -218,12 +224,13 @@ def train(
             key, state, frames, p_boot, e_boot = collect_rollout(
                 key, state, pursuer_used, evader_used, horizon, env, net)
             metrics = {}
+            key, k_up_p, k_up_e = jax.random.split(key, 3)
             if update_p:
                 p_params, p_opt, metrics = update_pursuer(
-                    p_params, p_opt, optimizer, frames, p_boot, net, EPOCHS)
+                    p_params, p_opt, optimizer, frames, p_boot, net, EPOCHS, key=k_up_p)
             if update_e:
                 new_e, new_opt, e_metrics = update_evader(
-                    update_e_params, update_e_opt, optimizer, frames, e_boot, net, EPOCHS)
+                    update_e_params, update_e_opt, optimizer, frames, e_boot, net, EPOCHS, key=k_up_e)
                 if learner == "exploiter":
                     exploiter_params, exploiter_opt = new_e, new_opt
                 else:
@@ -501,7 +508,8 @@ def _fresh_exploiter(env, key, net, p_params, optimizer, budget, log, step_fn, e
     while taken + horizon * env.n_worlds <= budget and horizon >= 1:
         key, state, frames, _, e_boot = collect_rollout(
             key, state, p_params, params, horizon, env, net)
-        params, opt_state, _ = update_evader(params, opt_state, optimizer, frames, e_boot, net, EPOCHS)
+        key, k_up = jax.random.split(key)
+        params, opt_state, _ = update_evader(params, opt_state, optimizer, frames, e_boot, net, EPOCHS, key=k_up)
         taken += horizon * env.n_worlds
         horizon = min(env.cfg.max_steps, (budget - taken) // env.n_worlds)
 
